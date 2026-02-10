@@ -3,7 +3,13 @@
 build_comparison_xlsx.py
 ========================
 Deterministic post-processing: LLM-aligned clause JSON → Excel workbook
-with bold-highlighted token diffs and line-by-line recap.
+with redline-style diff in the Amended column and bullet-point recap.
+
+The Amended Clause column shows a merged "redline" view:
+  - Deleted text  → red, strikethrough
+  - Inserted text → underlined, bold
+
+The Original Clause column shows verbatim original text (no formatting).
 
 Usage:
     python build_comparison_xlsx.py aligned_output.json comparison.xlsx
@@ -18,93 +24,91 @@ import xlsxwriter
 
 
 # ---------------------------------------------------------------------------
-# Token-level diff
+# Token-level diff  →  single redline stream
 # ---------------------------------------------------------------------------
 
 def diff_clause(orig: str, amd: str):
     """
-    Token-level diff between two clause texts.
+    Produce a redline token stream and a recap list.
 
     Returns
     -------
-    a_tokens   : list[str]   – tokens for the Original column
-    a_changed  : list[bool]  – True where the token differs
-    b_tokens   : list[str]   – tokens for the Amended column
-    b_changed  : list[bool]  – True where the token differs
-    recap      : list[str]   – human-readable change descriptions
+    redline : list[tuple[str, str]]
+        Each element is (token, style) where style is "equal", "delete",
+        or "insert".  The stream reads like the amended text but with
+        deleted tokens inserted inline (shown as strikethrough).
+    recap   : list[str]
+        Human-readable change descriptions (bullet-ready).
     """
     a_toks = orig.split()
     b_toks = amd.split()
 
     sm = difflib.SequenceMatcher(None, a_toks, b_toks, autojunk=False)
 
-    a_tokens: list[str] = []
-    a_changed: list[bool] = []
-    b_tokens: list[str] = []
-    b_changed: list[bool] = []
+    redline: list[tuple[str, str]] = []
     recap: list[str] = []
 
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            for t in a_toks[i1:i2]:
-                a_tokens.append(t)
-                a_changed.append(False)
             for t in b_toks[j1:j2]:
-                b_tokens.append(t)
-                b_changed.append(False)
+                redline.append((t, "equal"))
 
         elif tag == "replace":
             old_span = " ".join(a_toks[i1:i2])
             new_span = " ".join(b_toks[j1:j2])
             recap.append(f'"{old_span}" changed to "{new_span}"')
+            # Show deleted tokens (strikethrough) then inserted tokens (underline)
             for t in a_toks[i1:i2]:
-                a_tokens.append(t)
-                a_changed.append(True)
+                redline.append((t, "delete"))
             for t in b_toks[j1:j2]:
-                b_tokens.append(t)
-                b_changed.append(True)
+                redline.append((t, "insert"))
 
         elif tag == "delete":
             removed = " ".join(a_toks[i1:i2])
             recap.append(f'"{removed}" removed')
             for t in a_toks[i1:i2]:
-                a_tokens.append(t)
-                a_changed.append(True)
+                redline.append((t, "delete"))
 
         elif tag == "insert":
             added = " ".join(b_toks[j1:j2])
             recap.append(f'"{added}" added')
             for t in b_toks[j1:j2]:
-                b_tokens.append(t)
-                b_changed.append(True)
+                redline.append((t, "insert"))
 
-    return a_tokens, a_changed, b_tokens, b_changed, recap
+    return redline, recap
 
 
 # ---------------------------------------------------------------------------
 # Rich-text helper for xlsxwriter
 # ---------------------------------------------------------------------------
 
-def tokens_to_rich(tokens: list[str], changed: list[bool], bold_fmt, normal_fmt):
+def redline_to_rich(redline, del_fmt, ins_fmt, normal_fmt):
     """
-    Build an argument list for ``worksheet.write_rich_string()``.
+    Convert a redline token stream into xlsxwriter ``write_rich_string`` args.
 
-    xlsxwriter rich strings alternate *format, string* pairs.
-    A leading format applies to the first fragment.
+    Returns a list of alternating [format, string, format, string, ...].
     """
-    if not tokens:
+    if not redline:
         return []
 
     fragments: list = []
-    for i, (tok, is_bold) in enumerate(zip(tokens, changed)):
+    for i, (tok, style) in enumerate(redline):
         text = tok if i == 0 else " " + tok
-        if is_bold:
-            fragments.append(bold_fmt)
+        if style == "delete":
+            fragments.append(del_fmt)
+            fragments.append(text)
+        elif style == "insert":
+            fragments.append(ins_fmt)
             fragments.append(text)
         else:
             fragments.append(normal_fmt)
             fragments.append(text)
     return fragments
+
+
+def _rich_string_count(fragments):
+    """Count the number of text fragments (strings) in a rich-string arg list."""
+    return sum(1 for x in fragments if isinstance(x, str))
 
 
 # ---------------------------------------------------------------------------
@@ -114,43 +118,71 @@ def tokens_to_rich(tokens: list[str], changed: list[bool], bold_fmt, normal_fmt)
 def generate_excel(aligned_json: dict, output_path: str):
     wb = xlsxwriter.Workbook(output_path, {"strings_to_urls": False})
 
-    # ---- Formats --------------------------------------------------------
+    # ---- Header formats -------------------------------------------------
     header_green = wb.add_format({
-        "bold": True, "font_color": "#FFFFFF", "bg_color": "#4472C4",
+        "bold": True, "font_color": "#FFFFFF", "bg_color": "#1F5E43",
         "border": 1, "text_wrap": True, "valign": "vcenter",
-        "font_size": 11,
+        "font_size": 11, "font_name": "Calibri",
     })
     header_green2 = wb.add_format({
-        "bold": True, "font_color": "#FFFFFF", "bg_color": "#548235",
+        "bold": True, "font_color": "#FFFFFF", "bg_color": "#2E7D5A",
         "border": 1, "text_wrap": True, "valign": "vcenter",
-        "font_size": 11,
+        "font_size": 11, "font_name": "Calibri",
     })
     header_orange = wb.add_format({
-        "bold": True, "font_color": "#FFFFFF", "bg_color": "#C55A11",
+        "bold": True, "font_color": "#FFFFFF", "bg_color": "#B25A1B",
         "border": 1, "text_wrap": True, "valign": "vcenter",
-        "font_size": 11,
+        "font_size": 11, "font_name": "Calibri",
     })
     header_orange2 = wb.add_format({
-        "bold": True, "font_color": "#FFFFFF", "bg_color": "#BF8F00",
+        "bold": True, "font_color": "#FFFFFF", "bg_color": "#C46A22",
         "border": 1, "text_wrap": True, "valign": "vcenter",
-        "font_size": 11,
+        "font_size": 11, "font_name": "Calibri",
     })
+
+    # ---- Cell formats ---------------------------------------------------
     cell_wrap = wb.add_format({
         "text_wrap": True, "valign": "top", "border": 1,
-        "font_size": 10,
+        "font_size": 10, "font_name": "Calibri",
     })
     recap_wrap = wb.add_format({
         "text_wrap": True, "valign": "top", "border": 1,
-        "font_size": 9, "font_color": "#333333",
+        "font_size": 9, "font_color": "#333333", "font_name": "Calibri",
     })
-    bold_fmt = wb.add_format({
-        "bold": True, "font_color": "#C00000",
-        "text_wrap": True, "valign": "top",
-        "font_size": 10,
-    })
+
+    # ---- Rich-text fragment formats (used inside write_rich_string) -----
     normal_fmt = wb.add_format({
-        "text_wrap": True, "valign": "top",
-        "font_size": 10,
+        "font_size": 10, "font_name": "Calibri",
+    })
+    del_fmt = wb.add_format({
+        "font_strikeout": True,
+        "font_color": "#B91C1C",        # red
+        "bg_color": "#FDE8E8",          # light red background
+        "font_size": 10, "font_name": "Calibri",
+    })
+    ins_fmt = wb.add_format({
+        "underline": True,
+        "bold": True,
+        "font_color": "#065F46",         # dark green
+        "bg_color": "#FFF7CC",           # light yellow background
+        "font_size": 10, "font_name": "Calibri",
+    })
+    # For entire-clause-deleted: all text strikethrough
+    full_del_fmt = wb.add_format({
+        "font_strikeout": True,
+        "font_color": "#B91C1C",
+        "bg_color": "#FDE8E8",
+        "text_wrap": True, "valign": "top", "border": 1,
+        "font_size": 10, "font_name": "Calibri",
+    })
+    # For entire-clause-added: all text underlined
+    full_ins_fmt = wb.add_format({
+        "underline": True,
+        "bold": True,
+        "font_color": "#065F46",
+        "bg_color": "#FFF7CC",
+        "text_wrap": True, "valign": "top", "border": 1,
+        "font_size": 10, "font_name": "Calibri",
     })
 
     ws = wb.add_worksheet("Comparison")
@@ -184,49 +216,50 @@ def generate_excel(aligned_json: dict, output_path: str):
         ws.write(row, 0, display_name, cell_wrap)
 
         # ---- Entire clause deleted ----------------------------------
+        # Original col: plain text.  Amended col: full text strikethrough.
         if orig.strip() and not amd.strip():
             ws.write(row, 1, orig, cell_wrap)
-            ws.write(row, 2, "", cell_wrap)
+            ws.write(row, 2, orig, full_del_fmt)
             ws.write(row, 3, "Entire clause deleted", recap_wrap)
             ws.set_row(row, 160)
             row += 1
             continue
 
         # ---- New clause added ---------------------------------------
+        # Original col: empty.  Amended col: full text underlined.
         if amd.strip() and not orig.strip():
             ws.write(row, 1, "", cell_wrap)
-            ws.write(row, 2, amd, cell_wrap)
+            ws.write(row, 2, amd, full_ins_fmt)
             ws.write(row, 3, "New clause added", recap_wrap)
             ws.set_row(row, 160)
             row += 1
             continue
 
         # ---- Both present: diff them --------------------------------
-        a_tokens, a_changed, b_tokens, b_changed, recap = diff_clause(orig, amd)
+        redline, recap = diff_clause(orig, amd)
+        has_changes = any(s != "equal" for _, s in redline)
 
-        # If no changes at all → plain write (write_rich_string needs ≥2 fragments)
-        if not any(a_changed) and not any(b_changed):
-            ws.write(row, 1, orig, cell_wrap)
+        # Original column: always plain text
+        ws.write(row, 1, orig, cell_wrap)
+
+        if not has_changes:
+            # No differences — plain text in Amended too
             ws.write(row, 2, amd, cell_wrap)
             ws.write(row, 3, "No change", recap_wrap)
         else:
-            rich_a = tokens_to_rich(a_tokens, a_changed, bold_fmt, normal_fmt)
-            rich_b = tokens_to_rich(b_tokens, b_changed, bold_fmt, normal_fmt)
+            # Build rich-text redline for the Amended column
+            rich = redline_to_rich(redline, del_fmt, ins_fmt, normal_fmt)
 
-            # write_rich_string needs at least 2 string fragments
-            if len([x for x in rich_a if isinstance(x, str)]) >= 2:
-                ws.write_rich_string(row, 1, *rich_a, cell_wrap)
-            else:
-                ws.write(row, 1, orig, cell_wrap)
-
-            if len([x for x in rich_b if isinstance(x, str)]) >= 2:
-                ws.write_rich_string(row, 2, *rich_b, cell_wrap)
+            if _rich_string_count(rich) >= 2:
+                ws.write_rich_string(row, 2, *rich, cell_wrap)
             else:
                 ws.write(row, 2, amd, cell_wrap)
 
-            ws.write(row, 3, "\n".join(recap), recap_wrap)
+            # Recap as bullet list
+            recap_text = "\n".join(f"• {line}" for line in recap)
+            ws.write(row, 3, recap_text, recap_wrap)
 
-        # Simple row-height heuristic
+        # Row-height heuristic
         approx = max(len(orig), len(amd))
         ws.set_row(row, min(360, max(90, int(approx / 4))))
         row += 1

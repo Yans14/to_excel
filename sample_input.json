@@ -1,0 +1,79 @@
+{
+  "meta": {
+    "original_title": "Service Agreement v1.0",
+    "amended_title": "Service Agreement v2.0",
+    "excluded_rule": "Exclude anything marked Commented"
+  },
+  "clauses": [
+    {
+      "clause_key": "1|Definitions|1",
+      "clause_label_original": "1",
+      "clause_label_amended": "1",
+      "clause_name": "Definitions",
+      "original_text": "\"Service Provider\" means ABC Corp, a company incorporated under the laws of England and Wales with registration number 12345678.",
+      "amended_text": "\"Service Provider\" means XYZ Holdings Ltd, a company incorporated under the laws of England and Wales with registration number 87654321.",
+      "match_confidence": 1.0,
+      "match_basis": "numbering"
+    },
+    {
+      "clause_key": "2|Term|2",
+      "clause_label_original": "2",
+      "clause_label_amended": "2",
+      "clause_name": "Term",
+      "original_text": "This Agreement shall commence on 1 January 2025 and shall continue for a period of twelve (12) months unless terminated earlier in accordance with Clause 8.",
+      "amended_text": "This Agreement shall commence on 1 March 2025 and shall continue for a period of twenty-four (24) months unless terminated earlier in accordance with Clause 9.",
+      "match_confidence": 0.95,
+      "match_basis": "numbering"
+    },
+    {
+      "clause_key": "3|Fees|3",
+      "clause_label_original": "3",
+      "clause_label_amended": "3",
+      "clause_name": "Fees and Payment",
+      "original_text": "The Client shall pay the Service Provider a monthly fee of GBP 5,000 (five thousand pounds) within 30 days of receipt of a valid invoice.",
+      "amended_text": "The Client shall pay the Service Provider a monthly fee of GBP 7,500 (seven thousand five hundred pounds) within 14 days of receipt of a valid invoice. Late payments shall accrue interest at 4% per annum above the Bank of England base rate.",
+      "match_confidence": 0.9,
+      "match_basis": "numbering"
+    },
+    {
+      "clause_key": "4|Confidentiality|4",
+      "clause_label_original": "4",
+      "clause_label_amended": "4",
+      "clause_name": "Confidentiality",
+      "original_text": "Each party undertakes that it shall not disclose to any person any confidential information concerning the business, affairs, customers, clients or suppliers of the other party.",
+      "amended_text": "Each party undertakes that it shall not disclose to any person any confidential information concerning the business, affairs, customers, clients or suppliers of the other party.",
+      "match_confidence": 1.0,
+      "match_basis": "numbering"
+    },
+    {
+      "clause_key": "5|Liability Cap|5",
+      "clause_label_original": "5",
+      "clause_label_amended": "5",
+      "clause_name": "Limitation of Liability",
+      "original_text": "The total liability of the Service Provider under this Agreement shall not exceed GBP 50,000.",
+      "amended_text": "The total aggregate liability of the Service Provider arising under or in connection with this Agreement shall not exceed GBP 100,000.",
+      "match_confidence": 0.85,
+      "match_basis": "numbering"
+    },
+    {
+      "clause_key": "6|Non-Compete|6",
+      "clause_label_original": "6",
+      "clause_label_amended": "",
+      "clause_name": "Non-Compete",
+      "original_text": "The Service Provider agrees not to provide similar services to any direct competitor of the Client for a period of six (6) months following termination.",
+      "amended_text": "",
+      "match_confidence": 0.0,
+      "match_basis": "manual_inference"
+    },
+    {
+      "clause_key": "7|Data Protection|7",
+      "clause_label_original": "",
+      "clause_label_amended": "6",
+      "clause_name": "Data Protection",
+      "original_text": "",
+      "amended_text": "Both parties shall comply with all applicable data protection legislation including the UK GDPR and the Data Protection Act 2018. The Service Provider shall maintain appropriate technical and organisational measures to protect personal data.",
+      "match_confidence": 0.0,
+      "match_basis": "manual_inference"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Cache & environment
+.llm_cache/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files (optional — uncomment to track them)
+# *.xlsx

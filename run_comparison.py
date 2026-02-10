@@ -8,9 +8,10 @@ SPEED OPTIMISATIONS (vs. naïve one-shot approach):
   1. Pre-segment both documents locally with regex.
   2. Auto-align clauses by matching labels  →  detect identical clauses.
   3. Send ONLY unmatched / changed clauses to the LLM  (70-90 % fewer tokens).
-  4. Normalise input text (collapse whitespace)  →  10-30 % fewer input tokens.
-  5. Disk-cache LLM responses by content hash  →  instant re-runs.
-  6. Timing instrumentation for every stage.
+  4. Parallel batched LLM calls  →  N batches run concurrently (async).
+  5. Normalise input text (collapse whitespace)  →  10-30 % fewer input tokens.
+  6. Disk-cache LLM responses by content hash  →  instant re-runs.
+  7. Timing instrumentation for every stage.
 
 Use  --full  to bypass pre-segmentation and send everything to the LLM
 (original behaviour, useful when the document has unusual formatting).
@@ -22,6 +23,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import hashlib
 import os
@@ -31,9 +33,12 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI, AzureOpenAI
 
 from build_comparison_xlsx import generate_excel
+
+# Maximum clauses per LLM batch (auto-fallback to 1 call if total ≤ this)
+DEFAULT_BATCH_SIZE = 8
 
 # ──────────────────────────────────────────────────────────────────────
 # Timing helper
@@ -272,6 +277,199 @@ def _call_llm(client, deployment, prompt: str, max_tokens: int = 16_000) -> dict
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 5b. Async Azure OpenAI – parallel batched calls
+# ──────────────────────────────────────────────────────────────────────
+
+def _get_async_client():
+    """Return an async Azure OpenAI client + deployment name."""
+    load_dotenv()
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not all([endpoint, api_key, deployment]):
+        sys.exit(
+            "Missing Azure OpenAI config.\n"
+            "Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, "
+            "AZURE_OPENAI_DEPLOYMENT in .env or environment."
+        )
+    client = AsyncAzureOpenAI(
+        azure_endpoint=endpoint,
+        api_key=api_key,
+        api_version=api_version,
+    )
+    return client, deployment
+
+
+async def _async_call_llm(
+    client: AsyncAzureOpenAI,
+    deployment: str,
+    prompt: str,
+    batch_id: int,
+    max_tokens: int = 16_000,
+) -> dict:
+    """Single async LLM call. Returns parsed JSON + timing info."""
+    t0 = time.perf_counter()
+    resp = await client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a legal document comparison engine. "
+                    "Return ONLY valid JSON. No markdown fences, no prose."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
+    elapsed = time.perf_counter() - t0
+    raw = resp.choices[0].message.content
+    usage = resp.usage
+    print(
+        f"    batch {batch_id}: {elapsed:.1f}s  |  "
+        f"{usage.prompt_tokens:,} prompt → {usage.completion_tokens:,} completion"
+    )
+    return _extract_json(raw)
+
+
+def _chunk_list(lst: list, n: int) -> list[list]:
+    """Split a list into chunks of at most n items."""
+    return [lst[i : i + n] for i in range(0, len(lst), n)]
+
+
+def _build_batch_prompt(
+    changed_pairs: list[tuple[dict, dict]],
+    unmatched_orig: list[dict],
+    unmatched_amd: list[dict],
+) -> str:
+    """
+    Build a lean prompt for a single batch of clauses.
+    Same format as _build_lean_prompt but for a subset.
+    """
+    lines = [
+        "You are a legal document comparison engine.",
+        "",
+        "Below are clauses extracted from an Original and an Amended contract.",
+        "These clauses could NOT be auto-aligned or are textually different.",
+        "",
+        "TASK:",
+        "1) Align each Original clause to its Amended counterpart (or mark as deleted/new).",
+        "2) Preserve clause text EXACTLY as written.",
+        "3) Do NOT interpret or summarise legal meaning.",
+        "",
+        "OUTPUT JSON ONLY:",
+        '{',
+        '  \"clauses\": [',
+        '    {',
+        '      \"clause_key\": \"...\",',
+        '      \"clause_label_original\": \"...\",',
+        '      \"clause_label_amended\": \"...\",',
+        '      \"clause_name\": \"...\",',
+        '      \"original_text\": \"FULL TEXT or empty if new clause\",',
+        '      \"amended_text\": \"FULL TEXT or empty if deleted clause\",',
+        '      \"match_confidence\": 0.0,',
+        '      \"match_basis\": \"numbering|heading|text_similarity\"',
+        '    }',
+        '  ]',
+        '}',
+        "",
+    ]
+    if changed_pairs:
+        lines.append("=== CHANGED CLAUSES (matched by label, text differs) ===")
+        for o, a in changed_pairs:
+            lines.append(f'\n--- ORIGINAL [{o["label"]}] ---')
+            lines.append(o["text"])
+            lines.append(f'\n--- AMENDED  [{a["label"]}] ---')
+            lines.append(a["text"])
+        lines.append("")
+    if unmatched_orig:
+        lines.append("=== UNMATCHED ORIGINAL CLAUSES (possibly deleted) ===")
+        for seg in unmatched_orig:
+            lines.append(f'\n--- ORIG [{seg["label"]}] ---')
+            lines.append(seg["text"])
+        lines.append("")
+    if unmatched_amd:
+        lines.append("=== UNMATCHED AMENDED CLAUSES (possibly new) ===")
+        for seg in unmatched_amd:
+            lines.append(f'\n--- AMD [{seg["label"]}] ---')
+            lines.append(seg["text"])
+    return "\n".join(lines)
+
+
+async def _parallel_llm_calls(
+    changed_pairs: list[tuple[dict, dict]],
+    unmatched_orig: list[dict],
+    unmatched_amd: list[dict],
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> list[dict]:
+    """
+    Split clause work into batches and fire LLM calls concurrently.
+
+    Returns a flat list of clause dicts from all batches, in order.
+    """
+    # Build work items  –  each is (changed_pairs_chunk, unmatched_orig_chunk, unmatched_amd_chunk)
+    changed_chunks = _chunk_list(changed_pairs, batch_size) if changed_pairs else [[]]
+    uorig_chunks = _chunk_list(unmatched_orig, batch_size) if unmatched_orig else [[]]
+    uamd_chunks = _chunk_list(unmatched_amd, batch_size) if unmatched_amd else [[]]
+
+    # Merge into batch work items: distribute changed, unmatched_orig, unmatched_amd
+    # across batches.  Strategy: first fill batches with changed pairs, then
+    # spread unmatched across remaining slots.
+    batches: list[tuple[list, list, list]] = []
+
+    # Max batches needed
+    n_batches = max(len(changed_chunks), len(uorig_chunks), len(uamd_chunks))
+    for i in range(n_batches):
+        cp = changed_chunks[i] if i < len(changed_chunks) else []
+        uo = uorig_chunks[i] if i < len(uorig_chunks) else []
+        ua = uamd_chunks[i] if i < len(uamd_chunks) else []
+        # Only add batch if there's actual work
+        if cp or uo or ua:
+            batches.append((cp, uo, ua))
+
+    if not batches:
+        return []
+
+    # Single batch → no overhead of async, just use sync
+    if len(batches) == 1:
+        cp, uo, ua = batches[0]
+        prompt = _build_batch_prompt(cp, uo, ua)
+        client_sync, deployment = _get_client()
+        print(f"\n📤 Single batch ({len(cp)} changed + {len(uo)} deleted + {len(ua)} new clauses)")
+        result = _call_llm(client_sync, deployment, prompt)
+        return result.get("clauses", [])
+
+    # Multiple batches → fire concurrently
+    print(f"\n📤 Parallel: {len(batches)} batches (batch_size={batch_size})")
+    client_async, deployment = _get_async_client()
+
+    prompts = [_build_batch_prompt(cp, uo, ua) for cp, uo, ua in batches]
+    for i, p in enumerate(prompts):
+        print(f"    batch {i}: {len(p):,} chars")
+
+    t0 = time.perf_counter()
+    tasks = [
+        _async_call_llm(client_async, deployment, prompt, batch_id=i)
+        for i, prompt in enumerate(prompts)
+    ]
+    results = await asyncio.gather(*tasks)
+    elapsed = time.perf_counter() - t0
+    print(f"  ⏱  All {len(batches)} batches completed in {elapsed:.1f}s (wall clock)")
+
+    await client_async.close()
+
+    # Flatten clauses in order
+    all_clauses: list[dict] = []
+    for r in results:
+        all_clauses.extend(r.get("clauses", []))
+    return all_clauses
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 6. Prompt builders
 # ──────────────────────────────────────────────────────────────────────
 
@@ -403,6 +601,7 @@ def run_pipeline(
     output_path: str = "comparison.xlsx",
     save_json: str | None = None,
     full_mode: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     t_total = time.perf_counter()
 
@@ -459,21 +658,19 @@ def run_pipeline(
         llm_clauses = []
 
         if need_llm:
-            changed_orig = [o for o, _ in changed]
-            changed_amd = [a for _, a in changed]
-            prompt = _build_lean_prompt(
-                changed_orig, changed_amd, unmatched_orig, unmatched_amd
-            )
-            prompt_chars = len(prompt)
-            full_chars = len(orig) + len(amd)
-            pct = (prompt_chars / full_chars * 100) if full_chars else 0
+            changed_pairs = list(changed)  # list of (orig_seg, amd_seg)
+            total_items = len(changed_pairs) + len(unmatched_orig) + len(unmatched_amd)
             print(
-                f"\n📤 Lean prompt: {prompt_chars:,} chars "
-                f"({pct:.0f}% of full documents)"
+                f"\n📤 {total_items} clause(s) need LLM alignment "
+                f"(batch_size={batch_size})"
             )
-            with Timer("LLM (lean)"):
-                llm_result = _call_llm(client, deployment, prompt)
-            llm_clauses = llm_result.get("clauses", [])
+            with Timer("LLM (parallel batches)"):
+                llm_clauses = asyncio.run(
+                    _parallel_llm_calls(
+                        changed_pairs, unmatched_orig, unmatched_amd,
+                        batch_size=batch_size,
+                    )
+                )
         else:
             print("\n⚡ All clauses matched identically — no LLM call needed!")
 
@@ -515,6 +712,14 @@ def main():
         action="store_true",
         help="Skip pre-segmentation, send full documents to LLM (slower but handles unusual formatting)",
     )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        metavar="N",
+        help=f"Max clauses per LLM batch (default: {DEFAULT_BATCH_SIZE}). "
+             "Batches run in parallel for faster processing.",
+    )
     args = ap.parse_args()
 
     run_pipeline(
@@ -523,6 +728,7 @@ def main():
         args.output,
         save_json=args.save_json,
         full_mode=args.full,
+        batch_size=args.batch_size,
     )
 
 
